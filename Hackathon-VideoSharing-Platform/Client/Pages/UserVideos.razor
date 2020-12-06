@@ -1,0 +1,26 @@
+﻿@page "/userVideos"
+@using Hackathon_VideoSharing_Platform.Shared
+@using Microsoft.AspNetCore.SignalR.Client
+@using Hackathon.VideoSharing.Platform.Client
+
+@inject SymmetricKeyIPFSDictionary dict
+
+<h3>User videos</h3>
+<div></div>
+@foreach(var video in videos)
+{
+    <div>@video.Key.Title</div> 
+    <div>@video.Key.Price</div>
+    <div>@video.Key.IPFSHash</div>
+}
+
+@code {
+    HubConnection hubConnection;
+    Dictionary<VideoMetaData, string> videos = new Dictionary<VideoMetaData, string>();
+
+    protected override async Task OnInitializedAsync()
+    {
+        videos = dict.GetVideos();
+
+    }
+}

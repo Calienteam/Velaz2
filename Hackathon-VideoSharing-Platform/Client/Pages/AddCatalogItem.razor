@@ -1,0 +1,193 @@
+﻿@page "/AddCatalogItem"
+@using Hackathon_VideoSharing_Platform.Shared
+@using Hackathon_VideoSharing_Platform.Shared.DTOs
+@using Hackathon.VideoSharing.Platform.Shared.DTOs
+@using Microsoft.AspNetCore.SignalR.Client
+@using Hackathon.VideoSharing.Platform.Client
+@using CommonLib 
+
+@inject SymmetricKeyIPFSDictionary dict
+@inject NavigationManager NavigationManager
+@inject IJSRuntime jsRuntime;
+@inject MetamaskService metamaskService;
+@inject MetamaskInterceptor metamaskInterceptor;
+@inject HttpClient http
+@implements IAsyncDisposable
+
+<h3>Add CatalogItem</h3>
+
+<div class="container">
+    <div class="row">
+        @if (IsSending)
+        {
+            <p>Loading...</p> }
+        else
+        {
+            <div class="col-md-5">
+                <h4 class="mb-3">Title</h4>
+                <EditForm Model="@videoMetaData" OnValidSubmit="@HandleAdding">
+                    <DataAnnotationsValidator />
+                    <ValidationSummary />
+
+                    <div class="form-group">
+                        <label for="title">Title</label>
+                        <InputText id="title" class="form-control" placeholder="Большая Заруба 2" @bind-Value="videoMetaData.Title" />
+                        <ValidationMessage For="@(() => videoMetaData.Title)" />
+                    </div>
+
+                    <div class="form-group">
+                        <label for="title">Price</label>
+                        <InputNumber id="cost" class="form-control" @bind-Value="videoMetaData.Price" />
+                        <ValidationMessage For="@(() => videoMetaData.Price)" />
+                    </div>
+                    <div class="form-group">
+                        <label for="password">Password</label>
+                        <InputText id="password" class="form-control" @bind-Value="password"/>
+                        <ValidationMessage For="@(() => password)"></ValidationMessage>
+                    </div>
+                    <div class="form-group">
+                        <label for="photo">Upload video</label>
+                        <InputFile OnChange="@OnFileSend" />
+                    </div>
+
+                    @if (MetamaskAvailable && EthereumEnabled)
+                    {
+                        <button type="submit" class="btn btn-primary">Add Film</button>
+                    }
+                    else
+                    {
+                        <button @onclick="EnableEthereumAsync">Connect metamask wallet</button>
+                    }
+                </EditForm>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    private string password;
+    private VideoMetaData videoMetaData = new VideoMetaData();
+    private byte[] videoBytes;
+    private HubConnection hubConnection;
+
+    //Metamask
+    bool MetamaskAvailable { get; set; }
+    bool EthereumEnabled { get; set; }
+    string SelectedAccount { get; set; }
+
+    private bool IsSending = false;
+
+    private async Task HandleAdding()
+    {
+        IsSending = true;
+        await SendMessage();
+        IsSending = false;
+    }
+
+    private async Task EmitEvent(PaymentEventDTO dto)
+    {
+
+    }
+
+    private async Task PollPasswords()
+    {
+        while (true)
+        {
+            await Task.Delay(100);
+
+            var nethContract = await dict.GetContract(metamaskInterceptor, metamaskService);
+
+            var events = await nethContract.GetPaymentEvents();
+
+            foreach (var i in events)
+            {
+                await EmitEvent(i);
+            }
+        }
+    }
+
+    protected async Task EnableEthereumAsync()
+    {
+        EthereumEnabled = await metamaskService.EnableEthereumAsync();
+        if (EthereumEnabled)
+        {
+            SelectedAccount = await metamaskService.GetSelectedAccount();
+        }
+    }
+
+    private async Task OnFileSend(InputFileChangeEventArgs e)
+    {
+        videoBytes = new byte[e.File.Size];
+        using var stream = e.File.OpenReadStream();
+
+        await stream.ReadAsync(videoBytes);
+
+        Console.WriteLine(videoBytes[10]);
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        hubConnection = new HubConnectionBuilder()
+            .WithUrl(NavigationManager.ToAbsoluteUri("/notificationhub"))
+            .Build();
+
+        await hubConnection.StartAsync();
+
+        //Metamask
+        MetamaskAvailable = await metamaskService.CheckMetamaskAvailability();
+
+        if (MetamaskAvailable)
+        {
+            metamaskService.SelectedAccountChanged += a =>
+            {
+                Console.WriteLine("accountchanged");
+                SelectedAccount = a;
+                this.StateHasChanged();
+                return Task.CompletedTask;
+            };
+        }
+
+        await EnableEthereumAsync();
+    }
+
+    async Task SendMessage()
+    {
+        var client = new IPFSConnection.IPFSConnection();
+
+        var key = password;
+
+        var encryptedRes = await http.PostAsJsonAsync<CryptoRequest>("api/crypto/encrypt", new CryptoRequest()
+        {
+            Password = key,
+            Data64 = Convert.ToBase64String(videoBytes)
+        });
+
+        Console.WriteLine(key);
+        Console.WriteLine(encryptedRes.StatusCode);
+        Console.WriteLine("Encrypted video");
+
+        var encryptedVideo64 = await encryptedRes.Content.ReadAsStringAsync();
+        var encryptedVideoBytes = Convert.FromBase64String(encryptedVideo64);
+
+        var hash = await client.UploadDataAsync(encryptedVideoBytes);
+
+        videoMetaData.IPFSHash = hash;
+
+        Console.WriteLine("Got hash: {0}", hash);
+
+        videoMetaData.AddressAuthor = SelectedAccount;
+
+        dict.Add(videoMetaData, key);
+
+        await hubConnection.SendAsync("BroadcastNewVideoInfo", videoMetaData);
+
+        var nethContract = await dict.GetContract(metamaskInterceptor, metamaskService);
+
+        await nethContract.PublishVideoRequestAsync(videoMetaData.Price, videoMetaData.IPFSHash);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        @*await hubConnection.DisposeAsync();*@
+    }
+}
